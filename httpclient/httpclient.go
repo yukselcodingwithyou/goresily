@@ -202,29 +202,29 @@ func (b *BasicResponseBuilder) Build() *BasicResponse {
 // HTTPClientConfig provides options for constructing a fasthttp.Client.
 type HTTPClientConfig struct {
 	// Timeout sets the underlying http.Client timeout.
-	Timeout time.Duration
+	Timeout time.Duration `json:"timeout" yaml:"timeout"`
 }
 
 // BreakerConfig defines CircuitBreaker settings.
 type BreakerConfig struct {
-	MaxFailures   int
-	Window        time.Duration
-	Timeout       time.Duration
-	TrialRequests int
-	TrialDuration time.Duration
-	OnStateChange func(circuitbreaker.State)
+	MaxFailures   int                        `json:"maxFailures,omitempty" yaml:"maxFailures,omitempty"`
+	Window        time.Duration              `json:"window,omitempty" yaml:"window,omitempty"`
+	Timeout       time.Duration              `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	TrialRequests int                        `json:"trialRequests,omitempty" yaml:"trialRequests,omitempty"`
+	TrialDuration time.Duration              `json:"trialDuration,omitempty" yaml:"trialDuration,omitempty"`
+	OnStateChange func(circuitbreaker.State) `json:"-" yaml:"-"`
 }
 
 // BulkheadConfig defines Bulkhead settings.
 type BulkheadConfig struct {
-	Limit int
+	Limit int `json:"limit,omitempty" yaml:"limit,omitempty"`
 }
 
 // Config groups the optional pieces used to build a Client.
 type Config struct {
-	HTTP     *HTTPClientConfig
-	Breaker  *BreakerConfig
-	Bulkhead *BulkheadConfig
+	HTTP     *HTTPClientConfig `json:"http" yaml:"http"`
+	Breaker  *BreakerConfig    `json:"breaker" yaml:"breaker"`
+	Bulkhead *BulkheadConfig   `json:"bulkhead" yaml:"bulkhead"`
 }
 
 func buildHTTP(cfg *HTTPClientConfig) *fasthttp.Client {
