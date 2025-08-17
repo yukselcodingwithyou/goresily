@@ -118,11 +118,19 @@ func (b *Builder) Build() *CircuitBreaker {
 
 func (cb *CircuitBreaker) setState(s State) {
 	if cb.state != s {
+		oldState := cb.state
 		cb.state = s
 		if cb.onStateChange != nil {
 			cb.onStateChange(s)
 		}
+		// Additional detailed logging for state transitions
+		cb.logStateTransition(oldState, s)
 	}
+}
+
+func (cb *CircuitBreaker) logStateTransition(from, to State) {
+	// This can be used by implementations that want detailed transition logging
+	// For now, this is just a placeholder that could be extended
 }
 
 // Execute runs fn if the breaker is closed.
