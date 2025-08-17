@@ -53,7 +53,14 @@ func NewClient(config *ClientConfig) *Client {
 			TrialRequests: 2,                // Allow 2 requests in half-open state
 			TrialDuration: 5 * time.Second,  // Trial period duration
 			OnStateChange: func(s circuitbreaker.State) {
-				log.Printf("[CLIENT] 🔄 Circuit Breaker State Changed: %s", formatState(s))
+				switch s {
+				case circuitbreaker.Closed:
+					log.Printf("[CLIENT] 🔄 ✅ Circuit Breaker: CLOSED → Service is healthy, allowing all requests")
+				case circuitbreaker.Open:
+					log.Printf("[CLIENT] 🔄 🚨 Circuit Breaker: OPEN → Service appears down, blocking requests for 10s")
+				case circuitbreaker.HalfOpen:
+					log.Printf("[CLIENT] 🔄 🔍 Circuit Breaker: HALF-OPEN → Testing service with limited requests (max 2)")
+				}
 			},
 		}
 	}
@@ -111,12 +118,29 @@ func (c *Client) makeRequest(ctx context.Context, endpoint string, requestID int
 
 	log.Printf("[CLIENT] 📤 Request #%d: %s", requestID, endpoint)
 	
+	// Show bulkhead status before making request
+	if c.config.BulkheadEnabled && c.httpClient.BH != nil {
+		current := c.httpClient.BH.CurrentUsage()
+		limit := c.httpClient.BH.Limit()
+		log.Printf("[CLIENT] 🚧 Bulkhead status: %d/%d slots used", current, limit)
+	}
+	
 	start := time.Now()
 	resp, err := c.httpClient.Call(ctx, req)
 	duration := time.Since(start)
 
 	if err != nil {
-		log.Printf("[CLIENT] ❌ Request #%d failed after %v: %v", requestID, duration, err)
+		// Provide more detailed error information
+		if err.Error() == "circuit breaker is open" {
+			log.Printf("[CLIENT] ❌ Request #%d BLOCKED by Circuit Breaker (duration: %v)", requestID, duration)
+		} else if err.Error() == "bulkhead full" {
+			current := c.httpClient.BH.CurrentUsage()
+			limit := c.httpClient.BH.Limit()
+			log.Printf("[CLIENT] ❌ Request #%d REJECTED by Bulkhead - all %d/%d slots occupied (duration: %v)", 
+				requestID, current, limit, duration)
+		} else {
+			log.Printf("[CLIENT] ❌ Request #%d failed after %v: %v", requestID, duration, err)
+		}
 		return nil, err
 	}
 
@@ -204,7 +228,23 @@ func (c *Client) demonstrateCircuitBreaker(ctx context.Context) {
 	log.Printf("[CLIENT] 📋 3. Half-Open → Closed (after successful trials)")
 	log.Printf("")
 
-	// Make requests to trigger circuit breaker
+	// Phase 1: Trigger failures to open circuit breaker
+	log.Printf("[CLIENT] 🔥 Phase 1: Triggering failures to open circuit breaker...")
+	c.runSequentialRequests(ctx)
+	
+	// Phase 2: Wait for circuit breaker to enter half-open state
+	log.Printf("\n[CLIENT] ⏰ Phase 2: Waiting for circuit breaker timeout (10s) to enter HALF-OPEN state...")
+	log.Printf("[CLIENT] 💤 Sleeping for 11 seconds to allow state transition...")
+	time.Sleep(11 * time.Second)
+	
+	// Phase 3: Make requests in half-open state to show recovery
+	log.Printf("\n[CLIENT] 🔄 Phase 3: Making requests in HALF-OPEN state to demonstrate recovery...")
+	
+	// Reduce the number of requests for half-open demonstration
+	originalRequests := c.config.MaxRequests
+	c.config.MaxRequests = 5
+	defer func() { c.config.MaxRequests = originalRequests }()
+	
 	c.runSequentialRequests(ctx)
 }
 
@@ -216,10 +256,44 @@ func (c *Client) demonstrateBulkhead(ctx context.Context) {
 	log.Printf("[CLIENT] 📋 This demo will show bulkhead limiting:")
 	log.Printf("[CLIENT] 📋 - Only %d concurrent requests allowed", 2)
 	log.Printf("[CLIENT] 📋 - Additional requests will be rejected")
+	log.Printf("[CLIENT] 📋 - Watch for bulkhead capacity usage logs")
 	log.Printf("")
 
 	// Make concurrent requests to trigger bulkhead
 	c.runConcurrentRequests(ctx)
+}
+
+func (c *Client) demonstrateBoth(ctx context.Context) {
+	log.Printf("\n" + strings.Repeat("=", 70))
+	log.Printf("[CLIENT] 🎭 COMBINED DEMONSTRATION (Circuit Breaker + Bulkhead)")
+	log.Printf(strings.Repeat("=", 70))
+	
+	log.Printf("[CLIENT] 📋 This demo shows interaction between both patterns:")
+	log.Printf("[CLIENT] 📋 1. Bulkhead limits concurrent requests (max 2)")
+	log.Printf("[CLIENT] 📋 2. Circuit breaker monitors failure rate")
+	log.Printf("[CLIENT] 📋 3. Both patterns work together for resilience")
+	log.Printf("")
+	
+	log.Printf("[CLIENT] 🔥 Phase 1: High concurrency to demonstrate bulkhead...")
+	c.runConcurrentRequests(ctx)
+	
+	log.Printf("\n[CLIENT] ⏰ Phase 2: Sequential requests to trigger circuit breaker...")
+	// Temporarily reduce concurrent workers for this phase
+	originalWorkers := c.config.ConcurrentWorkers
+	c.config.ConcurrentWorkers = 1
+	defer func() { c.config.ConcurrentWorkers = originalWorkers }()
+	
+	c.runSequentialRequests(ctx)
+	
+	log.Printf("\n[CLIENT] 💤 Phase 3: Waiting for circuit breaker recovery (11s)...")
+	time.Sleep(11 * time.Second)
+	
+	log.Printf("\n[CLIENT] 🔄 Phase 4: Testing recovery with both patterns active...")
+	originalRequests := c.config.MaxRequests
+	c.config.MaxRequests = 4
+	defer func() { c.config.MaxRequests = originalRequests }()
+	
+	c.runSequentialRequests(ctx)
 }
 
 func main() {
@@ -269,12 +343,7 @@ func main() {
 	case "bh":
 		client.demonstrateBulkhead(ctx)
 	case "both":
-		log.Printf("\n[CLIENT] 🎭 Running COMBINED demonstration (Circuit Breaker + Bulkhead)")
-		if *sequential {
-			client.runSequentialRequests(ctx)
-		} else {
-			client.runConcurrentRequests(ctx)
-		}
+		client.demonstrateBoth(ctx)
 	default:
 		log.Printf("[CLIENT] ❌ Unknown mode: %s", *mode)
 		log.Printf("[CLIENT] 💡 Use -mode=cb, -mode=bh, or -mode=both")
