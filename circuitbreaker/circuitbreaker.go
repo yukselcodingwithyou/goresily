@@ -3,6 +3,7 @@ package circuitbreaker
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -47,6 +48,24 @@ type CircuitBreaker struct {
 	trialStart    time.Time
 	state         State
 	onStateChange func(State)
+
+	successCount uint64
+	failureCount uint64
+	rejectCount  uint64
+	opened       uint64
+	halfOpened   uint64
+	closed       uint64
+}
+
+// Metrics holds counters for circuit breaker activity.
+type Metrics struct {
+	Successes  uint64
+	Failures   uint64
+	Rejected   uint64
+	Opened     uint64
+	HalfOpened uint64
+	Closed     uint64
+	State      State
 }
 
 // Builder constructs a CircuitBreaker.
@@ -118,6 +137,14 @@ func (b *Builder) Build() *CircuitBreaker {
 
 func (cb *CircuitBreaker) setState(s State) {
 	if cb.state != s {
+		switch s {
+		case Open:
+			atomic.AddUint64(&cb.opened, 1)
+		case HalfOpen:
+			atomic.AddUint64(&cb.halfOpened, 1)
+		case Closed:
+			atomic.AddUint64(&cb.closed, 1)
+		}
 		cb.state = s
 		if cb.onStateChange != nil {
 			cb.onStateChange(s)
@@ -139,10 +166,16 @@ func (cb *CircuitBreaker) Execute(fn func() error) error {
 	cb.mu.Unlock()
 
 	if state == Open {
+		atomic.AddUint64(&cb.rejectCount, 1)
 		return ErrOpen
 	}
 
 	err := fn()
+	if err != nil {
+		atomic.AddUint64(&cb.failureCount, 1)
+	} else {
+		atomic.AddUint64(&cb.successCount, 1)
+	}
 
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
@@ -206,4 +239,20 @@ func (cb *CircuitBreaker) startOpenTimer() {
 		cb.trialStart = time.Now()
 		cb.trialCount = 0
 	})
+}
+
+// Metrics returns current counters and state.
+func (cb *CircuitBreaker) Metrics() Metrics {
+	cb.mu.Lock()
+	state := cb.state
+	cb.mu.Unlock()
+	return Metrics{
+		Successes:  atomic.LoadUint64(&cb.successCount),
+		Failures:   atomic.LoadUint64(&cb.failureCount),
+		Rejected:   atomic.LoadUint64(&cb.rejectCount),
+		Opened:     atomic.LoadUint64(&cb.opened),
+		HalfOpened: atomic.LoadUint64(&cb.halfOpened),
+		Closed:     atomic.LoadUint64(&cb.closed),
+		State:      state,
+	}
 }

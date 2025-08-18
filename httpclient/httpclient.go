@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sync/atomic"
 	"time"
 
 	"github.com/valyala/fasthttp"
@@ -276,6 +277,17 @@ type Client struct {
 	HTTP *fasthttp.Client
 	CB   *circuitbreaker.CircuitBreaker
 	BH   *bulkhead.Bulkhead
+
+	reqCount     uint64
+	successCount uint64
+	errorCount   uint64
+}
+
+// Metrics holds counters for client calls.
+type Metrics struct {
+	Requests  uint64
+	Successes uint64
+	Errors    uint64
 }
 
 // New creates a Client from the provided configuration.
@@ -313,6 +325,7 @@ func NewPlain(httpCfg *HTTPClientConfig) *Client {
 
 // Call sends the request through the breaker and bulkhead and returns a response.
 func (c *Client) Call(ctx context.Context, req Request) (Response, error) {
+	atomic.AddUint64(&c.reqCount, 1)
 	u, err := url.Parse(req.URL())
 	if err != nil {
 		return nil, err
@@ -356,9 +369,11 @@ func (c *Client) Call(ctx context.Context, req Request) (Response, error) {
 	}
 
 	if err := c.execute(callFn); err != nil {
+		atomic.AddUint64(&c.errorCount, 1)
 		return &BasicResponse{StatusCodeVal: resp.StatusCode(), BodyBytes: append([]byte(nil), resp.Body()...), HeaderVals: convertHeaders(&resp)}, err
 	}
 
+	atomic.AddUint64(&c.successCount, 1)
 	return &BasicResponse{StatusCodeVal: resp.StatusCode(), BodyBytes: append([]byte(nil), resp.Body()...), HeaderVals: convertHeaders(&resp)}, nil
 }
 
@@ -381,4 +396,13 @@ func convertHeaders(resp *fasthttp.Response) http.Header {
 		h.Add(string(k), string(v))
 	})
 	return h
+}
+
+// Metrics returns counters about client calls.
+func (c *Client) Metrics() Metrics {
+	return Metrics{
+		Requests:  atomic.LoadUint64(&c.reqCount),
+		Successes: atomic.LoadUint64(&c.successCount),
+		Errors:    atomic.LoadUint64(&c.errorCount),
+	}
 }
