@@ -281,13 +281,25 @@ type Client struct {
 	reqCount     uint64
 	successCount uint64
 	errorCount   uint64
+	resp2xxCount uint64
+	resp3xxCount uint64
+	resp4xxCount uint64
+	resp5xxCount uint64
 }
 
 // Metrics holds counters for client calls.
 type Metrics struct {
-	Requests  uint64
-	Successes uint64
-	Errors    uint64
+	Requests          uint64
+	Successes         uint64
+	Errors            uint64
+	Resp2xx           uint64
+	Resp3xx           uint64
+	Resp4xx           uint64
+	Resp5xx           uint64
+	BreakerOpened     uint64
+	BreakerHalfOpened uint64
+	BreakerClosed     uint64
+	BulkheadFull      uint64
 }
 
 // New creates a Client from the provided configuration.
@@ -368,13 +380,25 @@ func (c *Client) Call(ctx context.Context, req Request) (Response, error) {
 		return nil
 	}
 
-	if err := c.execute(callFn); err != nil {
+	err = c.execute(callFn)
+	status := resp.StatusCode()
+	switch {
+	case status >= 200 && status < 300:
+		atomic.AddUint64(&c.resp2xxCount, 1)
+	case status >= 300 && status < 400:
+		atomic.AddUint64(&c.resp3xxCount, 1)
+	case status >= 400 && status < 500:
+		atomic.AddUint64(&c.resp4xxCount, 1)
+	case status >= 500 && status < 600:
+		atomic.AddUint64(&c.resp5xxCount, 1)
+	}
+	if err != nil {
 		atomic.AddUint64(&c.errorCount, 1)
-		return &BasicResponse{StatusCodeVal: resp.StatusCode(), BodyBytes: append([]byte(nil), resp.Body()...), HeaderVals: convertHeaders(&resp)}, err
+		return &BasicResponse{StatusCodeVal: status, BodyBytes: append([]byte(nil), resp.Body()...), HeaderVals: convertHeaders(&resp)}, err
 	}
 
 	atomic.AddUint64(&c.successCount, 1)
-	return &BasicResponse{StatusCodeVal: resp.StatusCode(), BodyBytes: append([]byte(nil), resp.Body()...), HeaderVals: convertHeaders(&resp)}, nil
+	return &BasicResponse{StatusCodeVal: status, BodyBytes: append([]byte(nil), resp.Body()...), HeaderVals: convertHeaders(&resp)}, nil
 }
 
 func (c *Client) execute(fn func() error) error {
@@ -400,9 +424,24 @@ func convertHeaders(resp *fasthttp.Response) http.Header {
 
 // Metrics returns counters about client calls.
 func (c *Client) Metrics() Metrics {
-	return Metrics{
+	m := Metrics{
 		Requests:  atomic.LoadUint64(&c.reqCount),
 		Successes: atomic.LoadUint64(&c.successCount),
 		Errors:    atomic.LoadUint64(&c.errorCount),
+		Resp2xx:   atomic.LoadUint64(&c.resp2xxCount),
+		Resp3xx:   atomic.LoadUint64(&c.resp3xxCount),
+		Resp4xx:   atomic.LoadUint64(&c.resp4xxCount),
+		Resp5xx:   atomic.LoadUint64(&c.resp5xxCount),
 	}
+	if c.CB != nil {
+		cbm := c.CB.Metrics()
+		m.BreakerOpened = cbm.Opened
+		m.BreakerHalfOpened = cbm.HalfOpened
+		m.BreakerClosed = cbm.Closed
+	}
+	if c.BH != nil {
+		bhm := c.BH.Metrics()
+		m.BulkheadFull = bhm.Rejected
+	}
+	return m
 }
